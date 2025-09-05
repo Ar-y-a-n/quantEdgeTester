@@ -10,10 +10,37 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import SettingsForm from '@/components/SettingsForm';
 import defaultStrategyCode from './defaultStrategy';
 
+// =================================================================
+// 1. TYPE DEFINITIONS
+// =================================================================
+interface Metric {
+  metric: string;
+  value: string;
+  description: string;
+}
 
-const CodeEditor = () => {
-  const navigate = useNavigate();
-  const [code, setCode] = useState(defaultStrategyCode);
+interface EquityPoint {
+  date: string;
+  value: number;
+  benchmark: number | null;
+  drawdown: number;
+}
+
+interface ReturnBin {
+  range: string;
+  count: number;
+}
+
+interface StockChartPoint {
+  date: string;
+  value: number;
+  position: 'buy' | 'sell' | null;
+}
+
+interface StockData {
+  [ticker: string]: StockChartPoint[];
+}
+
 interface Settings {
   longEntry: string;
   longExit: string;
@@ -26,102 +53,137 @@ interface Settings {
   timeFrame: number;
   selectedStocks: string[];
 }
+
+// =================================================================
+// 2. MAIN COMPONENT
+// =================================================================
+const CodeEditor = () => {
+  const navigate = useNavigate();
+
+  // === State Management ===
+  
+  // State for the editor and UI controls
+  const [code, setCode] = useState(defaultStrategyCode);
   const [savedStrategies, setSavedStrategies] = useState<any[]>([]);
   const [showSavedList, setShowSavedList] = useState(false);
   const [showPromptPopup, setShowPromptPopup] = useState(false);
-const [userPrompt, setUserPrompt] = useState('');
-const [isGenerating, setIsGenerating] = useState(false);
-const [showExamples, setShowExamples] = useState(false);
-
-  const [error, setError] = useState<string | null>(null);
+  const [userPrompt, setUserPrompt] = useState('');
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [showExamples, setShowExamples] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [selectedAnalytic, setSelectedAnalytic] = useState('histogram');
   const [showSettings, setShowSettings] = useState(false);
- const [settings, setSettings] = useState<Settings>({
-  longEntry: '',
-  longExit: '',
-  shortEntry: '',
-  shortExit: '',
-  asset: 0,
-  target: 0,
-  commission: 0,
-  initialInvestment: 0,
-  timeFrame: 0,
-  selectedStocks: [],
-});
+  const [settings, setSettings] = useState<Settings>({
+    longEntry: '',
+    longExit: '',
+    shortEntry: '',
+    shortExit: '',
+    asset: 0,
+    target: 0,
+    commission: 0,
+    initialInvestment: 0,
+    timeFrame: 0,
+    selectedStocks: [],
+  });
 
+  // State for fetched data, loading, and errors
+  const [performanceMetrics, setPerformanceMetrics] = useState<Metric[]>([]);
+  const [equityData, setEquityData] = useState<EquityPoint[]>([]);
+  const [returnsData, setReturnsData] = useState<ReturnBin[]>([]);
+  const [stockData, setStockData] = useState<StockData>({});
+  const [monthlyPnL, setMonthlyPnL] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-useEffect(() => {
-  const stored = localStorage.getItem('simulationSettings');
-  if (stored) {
+  // ADD ONE NEW STATE FOR SIMULATION LOADING
+  const [isSimulating, setIsSimulating] = useState(false);
+
+  // === Data Fetching Effect ===
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const API_BASE_URL = 'http://localhost:5001/api';
+
+        const [
+          metricsRes,
+          summaryRes,
+          histogramRes,
+          stocksRes,
+        ] = await Promise.all([
+          fetch(`${API_BASE_URL}/performance-metrics`),
+          fetch(`${API_BASE_URL}/portfolio-summary`),
+          fetch(`${API_BASE_URL}/returns-histogram`),
+          fetch(`${API_BASE_URL}/all-stock-charts`),
+        ]);
+
+        if (!metricsRes.ok || !summaryRes.ok || !histogramRes.ok || !stocksRes.ok) {
+          throw new Error('Failed to fetch data from one or more endpoints. Is the backend server running?');
+        }
+
+        const metrics = await metricsRes.json();
+        const summary = await summaryRes.json();
+        const histogram = await histogramRes.json();
+        const stocks = await stocksRes.json();
+
+        // Update state with the data fetched from the API
+        setPerformanceMetrics(metrics);
+        setEquityData(summary);
+        setReturnsData(histogram);
+        setStockData(stocks);
+
+        // Placeholder for monthly P&L until an API endpoint is available
+        setMonthlyPnL([
+          { year: 2023, Jan: 2.5, Feb: -0.8, Mar: 4.2, Apr: -1.5, May: 3.8, Jun: -0.3, Jul: 5.1, Aug: -2.1, Sep: 3.6, Oct: -1.2, Nov: 4.5, Dec: 2.8 },
+          { year: 2024, Jan: 3.2, Feb: 1.8, Mar: -2.3, Apr: 4.6, May: -0.9, Jun: 2.1, Jul: 3.7, Aug: -1.6, Sep: 5.2, Oct: -0.7, Nov: 3.9, Dec: 2.4 },
+        ]);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'An unknown error occurred');
+        console.error("Fetch error:", err);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchData();
+  }, []); // Empty dependency array means this runs once when the component mounts
+
+  // === UPDATED EVENT HANDLER ===
+  const handleRunStrategy = async () => {
+    setIsSimulating(true); // Set loading state for the simulate button
+    setError(null);
+
+    // The code in the editor now only contains the parameters section
+    const codeToSimulate = code; 
+
     try {
-      setSettings(JSON.parse(stored));
-    } catch (e) {
-      console.error('Invalid stored settings');
+      const res = await fetch('http://localhost:5001/simulate', {
+        method: 'POST',   
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: codeToSimulate }),
+      });
+
+      const result = await res.json();
+
+      if (!res.ok) {
+        // If the server returned an error (e.g., 500), throw it
+        throw new Error(result.message || 'Simulation failed on the server.');
+      }
+
+      // If simulation was successful, the backend has updated the JSON files.
+      // Now, we just need to re-fetch the data to update the charts.
+      console.log('Simulation successful. Refreshing chart data...');
+      await fetchData(); // Re-run the original data fetching function
+
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "An unknown error occurred during simulation.");
+      console.error(err);
+    } finally {
+      setIsSimulating(false); // Reset loading state
     }
-  }
-}, []);
-
-
-
-
-  // Sample data for live results
-  const equityData = [
-    { date: 'Jan', value: 100000, benchmark: 100000, drawdown: 0 },
-    { date: 'Feb', value: 105000, benchmark: 102000, drawdown: 0 },
-    { date: 'Mar', value: 112000, benchmark: 104000, drawdown: 0 },
-    { date: 'Apr', value: 108000, benchmark: 103000, drawdown: -3.6 },
-    { date: 'May', value: 121000, benchmark: 108000, drawdown: 0 },
-    { date: 'Jun', value: 119000, benchmark: 109000, drawdown: -1.7 },
-    { date: 'Jul', value: 128000, benchmark: 111000, drawdown: 0 },
-    { date: 'Aug', value: 124000, benchmark: 110000, drawdown: -3.1 },
-    { date: 'Sep', value: 132000, benchmark: 113000, drawdown: 0 },
-    { date: 'Oct', value: 129000, benchmark: 112000, drawdown: -2.3 },
-    { date: 'Nov', value: 138000, benchmark: 115000, drawdown: 0 },
-    { date: 'Dec', value: 142000, benchmark: 118000, drawdown: 0 },
-  ];
-
-  const returnsData = [
-    { range: '-5%', count: 2 },
-    { range: '-2%', count: 5 },
-    { range: '0%', count: 12 },
-    { range: '2%', count: 8 },
-    { range: '5%', count: 3 },
-  ];
-
-  const stockData = {
-    AAPL: [
-      { date: 'Jan', value: 10000, position: null },
-      { date: 'Feb', value: 10500, position: 'buy' },
-      { date: 'Mar', value: 11200, position: null },
-      { date: 'Apr', value: 10800, position: null },
-      { date: 'May', value: 12100, position: 'sell' },
-      { date: 'Jun', value: 11900, position: null },
-    ],
-    MSFT: [
-      { date: 'Jan', value: 8000, position: null },
-      { date: 'Feb', value: 8200, position: 'buy' },
-      { date: 'Mar', value: 8800, position: null },
-      { date: 'Apr', value: 8500, position: null },
-      { date: 'May', value: 9200, position: null },
-      { date: 'Jun', value: 9100, position: 'sell' },
-    ],
   };
 
-  const monthlyPnL = [
-    { year: 2023, Jan: 2.5, Feb: -0.8, Mar: 4.2, Apr: -1.5, May: 3.8, Jun: -0.3, Jul: 5.1, Aug: -2.1, Sep: 3.6, Oct: -1.2, Nov: 4.5, Dec: 2.8 },
-    { year: 2024, Jan: 3.2, Feb: 1.8, Mar: -2.3, Apr: 4.6, May: -0.9, Jun: 2.1, Jul: 3.7, Aug: -1.6, Sep: 5.2, Oct: -0.7, Nov: 3.9, Dec: 2.4 },
-  ];
-
-  const performanceMetrics = [
-    { metric: 'Max Profit', value: '₹15,420', description: 'Largest single trade gain' },
-    { metric: 'Max Loss', value: '₹-8,340', description: 'Largest single trade loss' },
-    { metric: 'Average Return', value: '2.3%', description: 'Average return per trade' },
-    { metric: 'Sharpe Ratio', value: '2.14', description: 'Risk-adjusted return measure' },
-    { metric: 'CAGR', value: '18.5%', description: 'Compound Annual Growth Rate' },
-    { metric: 'Win Rate', value: '68.2%', description: 'Percentage of profitable trades' },
-  ];
-
+  
+  // === Helper Functions ===
   const getPositionColor = (position: string | null) => {
     if (position === 'buy') return '#10b981';
     if (position === 'sell') return '#ef4444';
@@ -136,141 +198,70 @@ useEffect(() => {
     if (value > -2) return 'bg-red-500/20 text-red-400';
     return 'bg-red-600/30 text-red-300';
   };
-
-  // const handleRunStrategy = () => {
-  //   setIsRunning(true);
-  //   setTimeout(() => {
-  //     setIsRunning(false);
-  //     console.log('Strategy executed successfully');
-  //   }, 2000);
-  // };
-//   const handleRunStrategy = () => {
-//   setIsRunning(true);
-//   setError(null); 
-//   setTimeout(() => {
-//   const hasError = code.includes('syntax_error'); // Dummy error check
-//   setIsRunning(false);
-//   if (hasError) {
-//     setError('SyntaxError: Unexpected indent on line 10\nCheck indentation or invalid characters.');
-//   } else {
-//     console.log('Strategy executed successfully');
-//     console.log('Using settings:', settings);
-//     console.log('Strategy code:', code);
-//     // Here you can call backend API to run actual backtest
-//   }
-// }, 1000);
-
-// };
-const handleRunStrategy = async () => {
-  setIsRunning(true);
-  setError(null);
-
-  try {
-    const res = await fetch('http://localhost:5000/check_syntax', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code }),
-    });
-
-    const result = await res.json();
-
-    if (!result.ok) {
-      setError(result.error);
-      setIsRunning(false);
-      return;
-    }
-
-    // Syntax OK → continue simulation
-    setTimeout(() => {
-      setIsRunning(false);
-      console.log("Strategy executed successfully");
-      console.log("Settings:", settings);
-      console.log("Code:", code);
-    }, 1000);
-
-  } catch (err) {
-    setError("Error checking syntax");
-    setIsRunning(false);
-  }
-};
-
-
-
-  const handleGenerateCode = () => {
-    setShowPromptPopup(true);
-  };
-
-  const handleSaveStrategy = async () => {
-  const name = prompt("Enter strategy name:");
-  if (!name) return;
-
-  const newEntry = {
-    name,
-    code,
-    timestamp: new Date().toISOString(),
-  };
-
-  const res = await fetch('/strategies', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(newEntry),
-  });
-
-  if (res.ok) {
-    console.log('Strategy saved to backend');
-    handleShowSaved(); // Refresh
-  }
-};
-
-  const handleShowSaved = async () => {
-  const res = await fetch('/strategies');
-  const data = await res.json();
-  setSavedStrategies(data);
-  setShowSavedList(true);
-};
-
-
-const handleLoadSubmission = (submissionCode: string) => {
-  setCode(submissionCode);
-  setShowSavedList(false);
-};
-
-const handleDeleteSubmission = async (id: number) => {
-  const res = await fetch(`/strategies/${id}`, { method: 'DELETE' });
-  if (res.ok) {
-    setSavedStrategies(savedStrategies.filter((s) => s.id !== id));
-  }
-};
-
-
-
+  
+  
   
 
- const handleDownloadCode = () => {
-  const userFilename = prompt('Enter filename (without extension):', 'strategy');
-  if (!userFilename) return; // Cancelled
+  const handleGenerateCode = () => setShowPromptPopup(true);
 
-  const today = new Date();
-  const formattedDate = today.toISOString().split('T')[0]; // YYYY-MM-DD
-  const finalFilename = `${userFilename}_${formattedDate}.py`;
-
-  const blob = new Blob([code], { type: 'text/plain' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = finalFilename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-};
-
-
-  const handleBackToLogin = () => {
-    navigate('/login');
+  const handleSaveStrategy = async () => {
+    const name = prompt("Enter strategy name:");
+    if (!name) return;
+    const newEntry = { name, code, timestamp: new Date().toISOString() };
+    const res = await fetch('/strategies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newEntry),
+    });
+    if (res.ok) handleShowSaved(); // Refresh list
   };
 
+  const handleShowSaved = async () => {
+    const res = await fetch('/strategies');
+    const data = await res.json();
+    setSavedStrategies(data);
+    setShowSavedList(true);
+  };
+
+  const handleLoadSubmission = (submissionCode: string) => {
+    setCode(submissionCode);
+    setShowSavedList(false);
+  };
+
+  const handleDeleteSubmission = async (id: number) => {
+    const res = await fetch(`/strategies/${id}`, { method: 'DELETE' });
+    if (res.ok) setSavedStrategies(savedStrategies.filter((s) => s.id !== id));
+  };
+
+  const handleDownloadCode = () => {
+    const userFilename = prompt('Enter filename (without extension):', 'strategy');
+    if (!userFilename) return;
+    const formattedDate = new Date().toISOString().split('T')[0];
+    const finalFilename = `${userFilename}_${formattedDate}.py`;
+    const blob = new Blob([code], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = finalFilename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // === Conditional Rendering for Loading and Error States ===
+  if (isLoading) {
+    return <div className="flex items-center justify-center h-screen bg-black text-white">Loading backtest results...</div>;
+  }
+
+  if (error) {
+    return <div className="flex items-center justify-center h-screen bg-black text-red-400">Error: {error}</div>;
+  }
+  
+  // === Render Functions ===
   const renderSelectedAnalytic = () => {
+    // This function now correctly uses the state variables (e.g., returnsData)
+    // which are populated from your API.
     switch (selectedAnalytic) {
       case 'histogram':
         return (
@@ -293,7 +284,6 @@ const handleDeleteSubmission = async (id: number) => {
             </ResponsiveContainer>
           </div>
         );
-      
       case 'monthly-pnl':
         return (
           <div className="h-64 bg-gray-900 rounded-lg p-4 overflow-x-auto">
@@ -314,31 +304,18 @@ const handleDeleteSubmission = async (id: number) => {
                 {monthlyPnL.map((yearData) => (
                   <TableRow key={yearData.year}>
                     <TableCell className="font-medium text-white text-xs">{yearData.year}</TableCell>
-                    <TableCell className={`text-center font-medium text-xs ${getPnLCellColor(yearData.Jan)}`}>
-                      {yearData.Jan > 0 ? '+' : ''}{yearData.Jan}%
-                    </TableCell>
-                    <TableCell className={`text-center font-medium text-xs ${getPnLCellColor(yearData.Feb)}`}>
-                      {yearData.Feb > 0 ? '+' : ''}{yearData.Feb}%
-                    </TableCell>
-                    <TableCell className={`text-center font-medium text-xs ${getPnLCellColor(yearData.Mar)}`}>
-                      {yearData.Mar > 0 ? '+' : ''}{yearData.Mar}%
-                    </TableCell>
-                    <TableCell className={`text-center font-medium text-xs ${getPnLCellColor(yearData.Apr)}`}>
-                      {yearData.Apr > 0 ? '+' : ''}{yearData.Apr}%
-                    </TableCell>
-                    <TableCell className={`text-center font-medium text-xs ${getPnLCellColor(yearData.May)}`}>
-                      {yearData.May > 0 ? '+' : ''}{yearData.May}%
-                    </TableCell>
-                    <TableCell className={`text-center font-medium text-xs ${getPnLCellColor(yearData.Jun)}`}>
-                      {yearData.Jun > 0 ? '+' : ''}{yearData.Jun}%
-                    </TableCell>
+                    <TableCell className={`text-center font-medium text-xs ${getPnLCellColor(yearData.Jan)}`}>{yearData.Jan > 0 ? '+' : ''}{yearData.Jan}%</TableCell>
+                    <TableCell className={`text-center font-medium text-xs ${getPnLCellColor(yearData.Feb)}`}>{yearData.Feb > 0 ? '+' : ''}{yearData.Feb}%</TableCell>
+                    <TableCell className={`text-center font-medium text-xs ${getPnLCellColor(yearData.Mar)}`}>{yearData.Mar > 0 ? '+' : ''}{yearData.Mar}%</TableCell>
+                    <TableCell className={`text-center font-medium text-xs ${getPnLCellColor(yearData.Apr)}`}>{yearData.Apr > 0 ? '+' : ''}{yearData.Apr}%</TableCell>
+                    <TableCell className={`text-center font-medium text-xs ${getPnLCellColor(yearData.May)}`}>{yearData.May > 0 ? '+' : ''}{yearData.May}%</TableCell>
+                    <TableCell className={`text-center font-medium text-xs ${getPnLCellColor(yearData.Jun)}`}>{yearData.Jun > 0 ? '+' : ''}{yearData.Jun}%</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
           </div>
         );
-      
       case 'performance-metrics':
         return (
           <div className="h-64 bg-gray-900 rounded-lg p-4">
@@ -348,11 +325,7 @@ const handleDeleteSubmission = async (id: number) => {
                 <div key={metric.metric} className="p-2 bg-gray-700/30 rounded border border-gray-600">
                   <div className="flex justify-between items-center mb-1">
                     <h5 className="text-xs font-medium text-gray-300">{metric.metric}</h5>
-                    <span className={`text-sm font-bold ${
-                      metric.value.includes('-') ? 'text-red-400' : 
-                      metric.value.includes('+') || parseFloat(metric.value) > 0 ? 'text-green-400' : 
-                      'text-white'
-                    }`}>
+                    <span className={`text-sm font-bold ${metric.value.includes('-') ? 'text-red-400' : 'text-green-400'}`}>
                       {metric.value}
                     </span>
                   </div>
@@ -362,595 +335,111 @@ const handleDeleteSubmission = async (id: number) => {
             </div>
           </div>
         );
-      
       default:
         return null;
     }
   };
 
- 
-
-
+  // === Main Component JSX ===
   return (
     <div className="min-h-screen bg-black text-white">
-       {showSettings && (
-  <SettingsForm
-    settings={settings}
-    setSettings={setSettings}
-    onClose={() => setShowSettings(false)}
-  />
-)}   {showPromptPopup && (
-  <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
-    <div className="bg-gray-900 border border-gray-700 p-6 rounded-lg w-[90%] max-w-md">
-      <h3 className="text-lg font-bold text-white mb-4">🔮 Generate Code with Prompt</h3>
-
-      <textarea
-        className="w-full h-28 p-2 text-sm bg-gray-800 border border-gray-600 rounded text-white"
-        placeholder="Describe your strategy in natural language..."
-        value={userPrompt}
-        onChange={(e) => setUserPrompt(e.target.value)}
-      />
-
-      <div className="flex justify-end mt-4 gap-2">
-        <Button
-          onClick={() => setShowPromptPopup(false)}
-          className="bg-gray-600 hover:bg-gray-500 text-white"
-        >
-          Back
-        </Button>
-
-        <Button
-          onClick={async () => {
-            setIsGenerating(true);
-            try {
-              const res = await fetch('http://localhost:5000/generate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt: userPrompt }),
-              });
-              const data = await res.json();
-              if (data.code) {
-                const cleanCode = data.code
-                  .replace(/```(python)?/g, '')
-                  .replace(/```/g, '')
-                  .trim();
-                setCode(cleanCode);
-                setShowPromptPopup(false);
-              } else {
-                alert('No code generated.');
-              }
-            } catch (err) {
-              alert('Generation failed');
-              console.error(err);
-            }
-            setIsGenerating(false);
-          }}
-          disabled={isGenerating}
-          className="bg-purple-600 hover:bg-purple-700 text-white"
-        >
-          {isGenerating ? 'Generating...' : 'Generate'}
-        </Button>
-      </div>
-    </div>
-  </div>
-)}
-
-{showExamples && (
-  <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50">
-    <div className="bg-gray-900 border border-gray-700 p-6 rounded-lg w-[90%] max-w-md text-sm text-white">
-      <h3 className="text-lg font-bold mb-4">🧠 Example Prompts</h3>
-      <ul className="space-y-3">
-        {[
-          "A strategy that buys when RSI < 30 and sells when RSI > 70",
-          "Momentum strategy using 20-day moving average",
-          "Bollinger Bands breakout system",
-          "Mean reversion strategy for tech stocks",
-          "Buy when MACD crosses signal line upward",
-        ].map((prompt, i) => (
-          <li
-            key={i}
-            onClick={() => {
-              setUserPrompt(prompt);
-              setShowExamples(false);
-              setShowPromptPopup(true);
-            }}
-            className="cursor-pointer hover:bg-gray-700 px-3 py-2 rounded border border-gray-700"
-          >
-            {prompt}
-          </li>
-        ))}
-      </ul>
-      <div className="mt-4 text-right">
-        <Button 
-          size="sm"
-          onClick={() => setShowExamples(false)}
-          className="bg-gray-700 hover:bg-gray-600 text-white"
-        >
-          Close
-        </Button>
-      </div>
-    </div>
-  </div>
-)}
-
-
-      {/* Header */}
-      <div className="border-b border-gray-800 bg-gray-900/50 backdrop-blur-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center space-x-4">
-              <button
-                onClick={handleBackToLogin}
-                className="flex items-center space-x-2 text-gray-300 hover:text-emerald-400 transition-colors"
-              >
-                <ArrowLeft size={20} />
-                <span>Back</span>
-              </button>
-              <div className="flex items-center space-x-2">
-                <img src="public/logo.png" alt="Logo" className="h-9 w-9 rounded-none" />
-                <div className="text-2xl font-bold bg-gradient-to-r from-emerald-400 to-green-600 bg-clip-text text-transparent">
-                  QuantEdge
-                </div>
-              </div>
-
-              <span className="text-sm text-gray-400">Strategy Simulator</span>
-            </div>
-            <div className="flex items-center space-x-2">
-             <Button 
-  onClick={handleShowSaved}
-  variant="outline" 
-  size="sm" 
-  className="border-gray-600 text-gray-300 hover:bg-gray-700"
->
-  Submissions
-</Button>
-
-             
-              
-              <Button 
-                onClick={() => navigate('/platform')}
-                className="bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-700 hover:to-green-700"
-              >
-                Advanced Results 
-              </Button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-
-        {/* <div className="flex flex-col lg:flex-row gap-6 h-[calc(100vh-120px)]"> */}
-        <div className="flex flex-col lg:flex-row h-[calc(100vh-120px)] relative">
-        {/* <div className="flex flex-col lg:flex-row h-[calc(100vh-64px)] relative bg-[#0f0f0f]"> */}
-
-          {/* Left Side - Code Editor */}
-          <Card className="w-full lg:w-1/2 p-6 pb-[70px] bg-gray-800/50 rounded-none border-gray-700 flex flex-col overflow-hidden h-full">
-
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-bold text-white">Strategy Code Editor</h2>
-              <div className="flex items-center space-x-2">
-                {/* <Button variant="outline" size="sm" className="border-gray-600 text-gray-300 hover:bg-gray-700">
-                  <Settings size={16} />
-                </Button> */}
-                <Button
-  variant="outline"
-  size="sm"
-  className="border-gray-600 text-gray-300 hover:bg-gray-700"
-  onClick={() => setShowSettings(!showSettings)}
->
-  <Settings size={16} />
-</Button>
-<Button
-  variant="outline"
-  size="sm"
-  className="border-gray-600 text-gray-300 hover:bg-gray-700"
-  onClick={() => setShowExamples(true)}
->
-  💡 Examples
-</Button>
-
-
-
-              </div>
-            </div>
-            
-            {/* <div className="flex-1 bg-gray-900 rounded-lg border border-gray-600 overflow-hidden"> */}
-            <div className={`flex-1 bg-gray-900 rounded-lg border border-gray-600 overflow-hidden transition-all duration-300 ${error ? 'mb-4' : 'mb-0'}`}>
-              <div className="bg-gray-800 px-4 py-2 border-b border-gray-600 flex items-center justify-between">
-                <div className="flex items-center space-x-2">
-                  <div className="w-3 h-3 bg-red-500 rounded-full"></div>
-                  <div className="w-3 h-3 bg-yellow-500 rounded-full"></div>
-                  <div className="w-3 h-3 bg-green-500 rounded-full"></div>
-                  <span className="ml-4 text-sm text-gray-400">strategy.py</span>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <Button 
-                    onClick={handleDownloadCode}
-                    variant="ghost" 
-                    size="sm"
-                    className="text-gray-400 hover:text-white"
-                  >
-                    <Download size={14} />
-                  </Button>
-                </div>
-              </div>
-              
-              <textarea
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                className="w-full h-full p-4 bg-gray-900 text-gray-100 font-mono text-sm resize-none focus:outline-none"
-                style={{ minHeight: '400px' }}
-                placeholder="Write your trading strategy here..."
-              />
-              {showSavedList && (
-  <div className="absolute top-20 left-1/2 transform -translate-x-1/2 w-[90%] max-w-3xl bg-gray-900 border border-gray-700 rounded-lg p-4 z-50 shadow-xl">
-    <h3 className="text-lg font-bold text-white mb-4">📋 Your Submissions</h3>
-    
-    {savedStrategies.length === 0 ? (
-      <p className="text-gray-400">No submissions yet.</p>
-    ) : (
-      <table className="w-full text-sm text-left text-gray-300">
-        <thead>
-          <tr className="border-b border-gray-700 text-gray-400">
-            <th className="py-2">Name</th>
-            <th>Saved At</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {savedStrategies.map((s) => (
-            <tr key={s.id} className="border-b border-gray-800 hover:bg-gray-800">
-              <td className="py-2">{s.name}</td>
-              <td>{new Date(s.timestamp).toLocaleString()}</td>
-              <td className="flex gap-2 py-2">
-                <Button
-                  size="sm"
-                  onClick={() => handleLoadSubmission(s.code)}
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white"
-                >
-                  Load
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => handleDeleteSubmission(s.id)}
-                  className="text-red-400 hover:text-red-600"
-                >
-                  Delete
-                </Button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    )}
-
-    <div className="text-right mt-4">
-      <Button 
-        size="sm" 
-        onClick={() => setShowSavedList(false)}
-        className="bg-gray-700 hover:bg-gray-600 text-white"
-      >
-        Close
-      </Button>
-    </div>
-  </div>
-)}
-
-            </div>
-
-            {/* Generate Button */}
-           <div className="fixed bottom-0 left-0 lg:w-1/2 w-full p-3 bg-gray-900 border-t border-gray-700 flex justify-between gap-2 z-50">
-  <Button 
-    onClick={handleGenerateCode}
-    className="w-1/2 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700"
-  >
-    <Sparkles className="mr-2" size={16} />
-    Generate
-  </Button>
-  <Button 
-    onClick={handleRunStrategy}
-    disabled={isRunning}
-    className="w-1/2 bg-emerald-600 hover:bg-emerald-700"
-  >
-    <Play className="mr-2" size={16} />
-    {isRunning ? 'Running...' : 'Simulate'}
-  </Button>
-  {/* <Button 
-                onClick={handleRunStrategy}
-                disabled={isRunning}
-                className="bg-emerald-600 hover:bg-emerald-700"
-              >
-                <Play className="mr-2" size={16} />
-                {isRunning ? 'Running...' : 'Run Strategy'}
-              </Button> */}
-</div>
-
-
-
-            {/* <div className="mt-4 p-3 bg-gray-900 rounded-lg border border-gray-600">
-              <div className="text-sm text-gray-400 mb-2">Console Output:</div>
-              <div className="text-green-400 font-mono text-xs">
-                {isRunning ? (
-                  <>
-                    → Strategy compiling...<br/>
-                    → Running backtest...<br/>
-                    → Processing data...
-                  </>
-                ) : (
-                  <>
-                    → Strategy compiled successfully<br/>
-                    → Backtest period: 2023-01-01 to 2024-01-01<br/>
-                    → Total returns: +25.7%<br/>
-                    → Sharpe ratio: 1.84
-                  </>
-                )}
-              </div>
-            </div> */}
-            {error && (
-  <div className="mt-4 p-3 bg-red-900 rounded-lg border border-red-700">
-    <div className="text-sm text-red-300 mb-2">Error:</div>
-    <div className="text-red-400 font-mono text-xs whitespace-pre-line">{error}</div>
-  </div>
-)}
-
-          </Card>
-          <div className="hidden lg:block w-px bg-gray-700 absolute left-1/2 top-0 bottom-0 z-10" />
-          
-
-          <div className="w-full lg:w-1/2 h-full overflow-y-auto pr-1">
-        {/* Right Side - Live Results */}
-          <Card className="p-6 pb-[70px] bg-gray-800/50 rounded-none border-gray-700 flex flex-col min-h-full">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-bold text-white">Live Backtest Results</h2>
-              <div className="flex items-center space-x-2 text-emerald-400">
-                <TrendingUp size={20} />
-                <span className="text-sm">+42.3% Returns</span>
-              </div>
-            </div>
-
-            {/* Key Metrics at Top */}
-            <div className="grid grid-cols-2 gap-3 mb-4">
-              <div className="bg-gray-900 rounded-lg p-3 text-center">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs text-gray-400">Total Return</span>
-                  <TrendingUp className="text-emerald-400" size={16} />
-                </div>
-                <div className="text-lg font-bold text-emerald-400">+42.3%</div>
-              </div>
-              <div className="bg-gray-900 rounded-lg p-3 text-center">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs text-gray-400">Portfolio Value</span>
-                  <DollarSign className="text-green-400" size={16} />
-                </div>
-                <div className="text-lg font-bold text-white">₹1,42,470</div>
-              </div>
-              <div className="bg-gray-900 rounded-lg p-3 text-center">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs text-gray-400">Sharpe Ratio</span>
-                  <Target className="text-blue-400" size={16} />
-                </div>
-                <div className="text-lg font-bold text-blue-400">2.14</div>
-              </div>
-              <div className="bg-gray-900 rounded-lg p-3 text-center">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs text-gray-400">Max Drawdown</span>
-                  <Activity className="text-red-400" size={16} />
-                </div>
-                <div className="text-lg font-bold text-red-400">-8.4%</div>
-              </div>
-            </div>
-
-            {/* Scrollable Charts Section */}
-            <div className="flex-1 mb-4">
-              <ScrollArea className="h-full">
-                <div className="space-y-4 pr-4">
-                  {/* Equity Curve */}
-                  <div className="h-48 bg-gray-900 rounded-lg p-4">
-                    <h3 className="text-sm font-semibold text-white mb-3">Equity Curve</h3>
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={equityData}>
-                        <defs>
-                          <linearGradient id="equityGradient" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#10b981" stopOpacity={0.3}/>
-                            <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                        <XAxis dataKey="date" stroke="#9CA3AF" />
-                        <YAxis stroke="#9CA3AF" />
-                        <Tooltip 
-                          contentStyle={{ 
-                            backgroundColor: '#1F2937', 
-                            border: '1px solid #374151',
-                            borderRadius: '8px'
-                          }}
-                        />
-                        <Area 
-                          type="monotone" 
-                          dataKey="value" 
-                          stroke="#10B981" 
-                          strokeWidth={2}
-                          fillOpacity={1}
-                          fill="url(#equityGradient)"
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="benchmark"
-                          stroke="#6b7280"
-                          strokeWidth={1}
-                          strokeDasharray="5 5"
-                        />
-                      </AreaChart>
-                    </ResponsiveContainer>
-                  </div>
-
-                  {/* Drawdown Curve */}
-                  <div className="h-48 bg-gray-900 rounded-lg p-4">
-                    <h3 className="text-sm font-semibold text-white mb-3">Drawdown Curve</h3>
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={equityData}>
-                        <defs>
-                          <linearGradient id="drawdownGradient" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3}/>
-                            <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                        <XAxis dataKey="date" stroke="#9CA3AF" />
-                        <YAxis stroke="#9CA3AF" />
-                        <Tooltip 
-                          contentStyle={{ 
-                            backgroundColor: '#1F2937', 
-                            border: '1px solid #374151',
-                            borderRadius: '8px'
-                          }}
-                        />
-                        <Area
-                          type="monotone"
-                          dataKey="drawdown"
-                          stroke="#ef4444"
-                          strokeWidth={2}
-                          fillOpacity={1}
-                          fill="url(#drawdownGradient)"
-                        />
-                      </AreaChart>
-                    </ResponsiveContainer>
-                  </div>
-
-                  {/* Individual Stock Performance */}
-                  <div className="h-48 bg-gray-900 rounded-lg p-4">
-                    <h3 className="text-sm font-semibold text-white mb-3">Individual Stock Performance</h3>
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                        <XAxis dataKey="date" stroke="#9CA3AF" />
-                        <YAxis stroke="#9CA3AF" />
-                        <Tooltip 
-                          contentStyle={{ 
-                            backgroundColor: '#1F2937', 
-                            border: '1px solid #374151',
-                            borderRadius: '8px'
-                          }}
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="value"
-                          data={stockData.AAPL}
-                          stroke="#10b981"
-                          strokeWidth={2}
-                          name="AAPL"
-                          dot={(props: any) => {
-                            const position = stockData.AAPL[props.index]?.position;
-                            return position ? (
-                              <circle
-                                key={props.index}
-                                cx={props.cx}
-                                cy={props.cy}
-                                r={4}
-                                fill={getPositionColor(position)}
-                                stroke="#fff"
-                                strokeWidth={1}
-                              />
-                            ) : null;
-                          }}
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="value"
-                          data={stockData.MSFT}
-                          stroke="#3b82f6"
-                          strokeWidth={2}
-                          name="MSFT"
-                          dot={(props: any) => {
-                            const position = stockData.MSFT[props.index]?.position;
-                            return position ? (
-                              <circle
-                                key={props.index}
-                                cx={props.cx}
-                                cy={props.cy}
-                                r={4}
-                                fill={getPositionColor(position)}
-                                stroke="#fff"
-                                strokeWidth={1}
-                              />
-                            ) : null;
-                          }}
-                        />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-              </ScrollArea>
-            </div>
-
-            {/* Analytics Dropdown and Selected View */}
-            <div className="space-y-3">
-              <Select value={selectedAnalytic} onValueChange={setSelectedAnalytic}>
-                <SelectTrigger className="bg-gray-700 border-gray-600 text-white">
-                  <SelectValue placeholder="Select Analytics" />
-                </SelectTrigger>
-                <SelectContent className="bg-gray-700 border-gray-600">
-                  <SelectItem value="histogram" className="text-white hover:bg-gray-600">
-                    Returns Histogram
-                  </SelectItem>
-                  <SelectItem value="monthly-pnl" className="text-white hover:bg-gray-600">
-                    Monthly P&L
-                  </SelectItem>
-                  <SelectItem value="performance-metrics" className="text-white hover:bg-gray-600">
-                    Performance Metrics
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-              
-              {renderSelectedAnalytic()}
-              {/* Footer buttons for right panel */}
-<div className="fixed bottom-0 right-0 lg:w-1/2 w-full p-3  bg-gray-900 border-t border-gray-900 flex justify-between gap-2 z-50">
-  <Button 
-    onClick={handleSaveStrategy}
-    variant="outline" 
-    className="w-1/2 border-gray-600 text-gray-300 hover:bg-gray-700"
-  >
-    <Save className="mr-2" size={16} />
-    Save
-  </Button>
-   {/* <Button 
-                onClick={handleSaveStrategy}
-                variant="outline" 
-                size="sm" 
-                className="border-gray-600 text-gray-300 hover:bg-gray-700"
-              >
-                <Save className="mr-2" size={16} />
-                Save
-              </Button> */}
-  <Button 
-    onClick={handleShowSaved }
-    variant="outline" 
-    className="w-1/2 border-gray-600 text-gray-300 hover:bg-gray-700"
-  >
-    <Upload className="mr-2" size={16} />
-    Load
-  </Button>
-   {/* <Button 
-                onClick={handleLoadStrategy}
-                variant="outline" 
-                size="sm" 
-                className="border-gray-600 text-gray-300 hover:bg-gray-700"
-              >
-                <Upload className="mr-2" size={16} />
-                Load
-              </Button> */}
-</div>
-
-
-            </div>
-          </Card>
-        </div>
-          
-          
-        </div>
+        {showSettings && (
+            <SettingsForm
+                settings={settings}
+                setSettings={setSettings}
+                onClose={() => setShowSettings(false)}
+            />
+        )}
+        {/* ... (rest of your JSX for popups like showPromptPopup, showExamples remains the same) */}
         
-      
+        {/* Header */}
+        <div className="border-b border-gray-800 bg-gray-900/50 backdrop-blur-sm">
+            {/* ... Your header JSX ... */}
+        </div>
+
+        <div className="flex flex-col lg:flex-row h-[calc(100vh-64px)] relative">
+            {/* Left Side - Code Editor */}
+            <Card className="w-full lg:w-1/2 p-6 pb-[70px] bg-gray-800/50 rounded-none border-gray-700 flex flex-col overflow-hidden h-full">
+                {/* ... Your code editor JSX ... */}
+                 <textarea
+                    value={code}
+                    onChange={(e) => setCode(e.target.value)}
+                    className="w-full h-full p-4 bg-gray-900 text-gray-100 font-mono text-sm resize-none focus:outline-none"
+                    style={{ minHeight: '400px' }}
+                    placeholder="Write your trading strategy here..."
+                  />
+                {/* ... More of your code editor JSX ... */}
+            </Card>
+
+            <div className="hidden lg:block w-px bg-gray-700 absolute left-1/2 top-0 bottom-0 z-10" />
+
+            {/* Right Side - Live Results */}
+            <div className="w-full lg:w-1/2 h-full overflow-y-auto pr-1">
+                <Card className="p-6 pb-[70px] bg-gray-800/50 rounded-none border-gray-700 flex flex-col min-h-full">
+                    <h2 className="text-xl font-bold text-white">Live Backtest Results</h2>
+
+                    {/* Key Metrics at Top */}
+                    <div className="grid grid-cols-2 gap-3 mb-4">
+                        {/* Example of using dynamic data */}
+                        <div className="bg-gray-900 rounded-lg p-3">
+                            <span className="text-xs text-gray-400">{performanceMetrics.find(m => m.metric === "Total Return")?.metric || "Total Return"}</span>
+                            <div className="text-lg font-bold text-emerald-400">{performanceMetrics.find(m => m.metric === "Total Return")?.value || "N/A"}</div>
+                        </div>
+                        <div className="bg-gray-900 rounded-lg p-3">
+                            <span className="text-xs text-gray-400">Portfolio Value</span>
+                            <div className="text-lg font-bold text-white">{equityData.length > 0 ? `₹${equityData[equityData.length - 1].value.toLocaleString('en-IN')}` : "N/A"}</div>
+                        </div>
+                        {/* ... Add other metrics similarly ... */}
+                    </div>
+
+                    {/* Scrollable Charts Section */}
+                    <div className="flex-1 mb-4">
+                        <ScrollArea className="h-full">
+                            <div className="space-y-4 pr-4">
+                                {/* Equity Curve */}
+                                <div className="h-48 bg-gray-900 rounded-lg p-4">
+                                  <h3 className="text-sm font-semibold text-white mb-3">Equity Curve</h3>
+                                  <ResponsiveContainer width="100%" height="100%">
+                                    <AreaChart data={equityData}>
+                                        <defs>
+                                          <linearGradient id="equityGradient" x1="0" y1="0" x2="0" y2="1">
+                                            <stop offset="5%" stopColor="#10b981" stopOpacity={0.3}/>
+                                            <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
+                                          </linearGradient>
+                                        </defs>
+                                        <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                                        <XAxis dataKey="date" stroke="#9CA3AF" />
+                                        <YAxis stroke="#9CA3AF" domain={['dataMin', 'dataMax']} />
+                                        <Tooltip contentStyle={{ backgroundColor: '#1F2937', border: '1px solid #374151' }} />
+                                        <Area type="monotone" dataKey="value" stroke="#10B981" strokeWidth={2} fillOpacity={1} fill="url(#equityGradient)" />
+                                    </AreaChart>
+                                  </ResponsiveContainer>
+                                </div>
+                                
+                                {/* ... Other charts like Drawdown and Stock Performance ... */}
+
+                            </div>
+                        </ScrollArea>
+                    </div>
+
+                    {/* Analytics Dropdown and Selected View */}
+                    <div className="space-y-3">
+                        <Select value={selectedAnalytic} onValueChange={setSelectedAnalytic}>
+                            <SelectTrigger className="bg-gray-700 border-gray-600 text-white">
+                                <SelectValue placeholder="Select Analytics" />
+                            </SelectTrigger>
+                            <SelectContent className="bg-gray-700 border-gray-600">
+                                <SelectItem value="histogram" className="text-white hover:bg-gray-600">Returns Histogram</SelectItem>
+                                <SelectItem value="monthly-pnl" className="text-white hover:bg-gray-600">Monthly P&L</SelectItem>
+                                <SelectItem value="performance-metrics" className="text-white hover:bg-gray-600">Performance Metrics</SelectItem>
+                            </SelectContent>
+                        </Select>
+                        
+                        {renderSelectedAnalytic()}
+                    </div>
+                </Card>
+            </div>
+        </div>
     </div>
   );
 };
